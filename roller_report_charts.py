@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
 Boggy Creek Airboats — Daily Roller Report with Inline Charts
-Generates an HTML email with matplotlib charts (base64 inline PNGs)
+Generates an HTML email with CID-embedded chart images (Gmail compatible)
 and sends via Gmail SMTP (smtplib).
 """
 
 import argparse
-import base64
 import io
 import os
 import smtplib
 import sys
 from datetime import datetime, timedelta
+from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -54,13 +54,14 @@ WHITE = "#e0e0e0"
 GRID = "#1a1a2e"
 
 
-def _fig_to_base64(fig):
+def _fig_to_png_bytes(fig):
+    """Render a matplotlib figure to PNG bytes."""
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=110, bbox_inches="tight",
                 facecolor=fig.get_facecolor(), edgecolor="none")
     plt.close(fig)
     buf.seek(0)
-    return base64.b64encode(buf.read()).decode("utf-8")
+    return buf.read()
 
 
 def chart_revenue(labels, values):
@@ -83,7 +84,7 @@ def chart_revenue(labels, values):
     ax.spines[:].set_visible(False)
     ax.yaxis.set_visible(False)
     ax.grid(axis="y", color=GRID, linewidth=0.5)
-    return _fig_to_base64(fig)
+    return _fig_to_png_bytes(fig)
 
 
 def chart_channels(labels, values):
@@ -108,7 +109,7 @@ def chart_channels(labels, values):
               framealpha=0.9)
     ax.set_title("Bookings by Channel", color=TEAL, fontsize=12,
                  fontweight="bold", pad=10)
-    return _fig_to_base64(fig)
+    return _fig_to_png_bytes(fig)
 
 
 def chart_checkins(labels, values):
@@ -135,7 +136,7 @@ def chart_checkins(labels, values):
     ax.spines[:].set_visible(False)
     ax.yaxis.set_visible(False)
     ax.grid(axis="y", color=GRID, linewidth=0.5)
-    return _fig_to_base64(fig)
+    return _fig_to_png_bytes(fig)
 
 
 def chart_gx_gauge(score):
@@ -143,11 +144,10 @@ def chart_gx_gauge(score):
     fig.set_facecolor(BG)
     ax.set_facecolor(BG)
 
-    # Semi-circle gauge: 0-100 mapped to pi..0
     zones = [
-        (0, 40, "#e53935"),    # red
-        (40, 70, "#FFC107"),   # yellow
-        (70, 100, "#00E676"),  # green
+        (0, 40, "#e53935"),
+        (40, 70, "#FFC107"),
+        (70, 100, "#00E676"),
     ]
     for lo, hi, color in zones:
         theta_start = np.pi * (1 - lo / 100)
@@ -155,13 +155,11 @@ def chart_gx_gauge(score):
         theta = np.linspace(theta_start, theta_end, 50)
         ax.fill_between(theta, 0.7, 1.0, color=color, alpha=0.35)
 
-    # Needle
     needle_angle = np.pi * (1 - score / 100)
     ax.plot([needle_angle, needle_angle], [0, 0.9], color=TEAL,
             linewidth=3, solid_capstyle="round")
     ax.plot(needle_angle, 0.9, "o", color=TEAL, markersize=6)
 
-    # Score text
     ax.text(np.pi / 2, 0.15, f"{score}", ha="center", va="center",
             fontsize=28, fontweight="bold", color=TEAL,
             transform=ax.transData)
@@ -177,17 +175,25 @@ def chart_gx_gauge(score):
     ax.axis("off")
     ax.set_title("GX Score", color=TEAL, fontsize=12, fontweight="bold",
                  pad=10, y=1.05)
-    return _fig_to_base64(fig)
+    return _fig_to_png_bytes(fig)
+
+
+# ── Generate all charts ─────────────────────────────────────────────────────
+
+def generate_charts(data):
+    """Return dict of {cid: png_bytes} for all charts."""
+    return {
+        "chart_revenue": chart_revenue(data["revenue_labels"], data["revenue_values"]),
+        "chart_channels": chart_channels(data["channel_labels"], data["channel_values"]),
+        "chart_checkins": chart_checkins(data["checkin_labels"], data["checkin_values"]),
+        "chart_gx": chart_gx_gauge(data["gx_score"]),
+    }
 
 
 # ── HTML builder ────────────────────────────────────────────────────────────
 
 def build_html(data):
-    rev_b64 = chart_revenue(data["revenue_labels"], data["revenue_values"])
-    chan_b64 = chart_channels(data["channel_labels"], data["channel_values"])
-    chk_b64 = chart_checkins(data["checkin_labels"], data["checkin_values"])
-    gx_b64 = chart_gx_gauge(data["gx_score"])
-
+    """Build HTML referencing charts via cid: URLs (Gmail compatible)."""
     today_str = datetime.now().strftime("%A, %B %d, %Y")
 
     def metric_card(label, value):
@@ -225,26 +231,26 @@ def build_html(data):
     </tr></table>
   </td></tr>
 
-  <!-- Revenue + Channels -->
+  <!-- Revenue + Channels side by side -->
   <tr><td style="padding:10px;">
     <table width="100%" cellpadding="0" cellspacing="0"><tr>
       <td width="55%" style="padding-right:6px;">
-        <img src="data:image/png;base64,{rev_b64}" width="100%" style="display:block;border-radius:8px;" alt="Revenue Chart">
+        <img src="cid:chart_revenue" width="100%" style="display:block;border-radius:8px;" alt="7-Day Revenue">
       </td>
       <td width="45%" style="padding-left:6px;">
-        <img src="data:image/png;base64,{chan_b64}" width="100%" style="display:block;border-radius:8px;" alt="Channel Chart">
+        <img src="cid:chart_channels" width="100%" style="display:block;border-radius:8px;" alt="Bookings by Channel">
       </td>
     </tr></table>
   </td></tr>
 
-  <!-- Check-ins + GX Score -->
+  <!-- Check-ins + GX Score side by side -->
   <tr><td style="padding:10px;">
     <table width="100%" cellpadding="0" cellspacing="0"><tr>
       <td width="60%" style="padding-right:6px;">
-        <img src="data:image/png;base64,{chk_b64}" width="100%" style="display:block;border-radius:8px;" alt="Check-ins Chart">
+        <img src="cid:chart_checkins" width="100%" style="display:block;border-radius:8px;" alt="Daily Check-ins">
       </td>
       <td width="40%" style="padding-left:6px;vertical-align:middle;">
-        <img src="data:image/png;base64,{gx_b64}" width="100%" style="display:block;border-radius:8px;" alt="GX Score">
+        <img src="cid:chart_gx" width="100%" style="display:block;border-radius:8px;" alt="GX Score">
       </td>
     </tr></table>
   </td></tr>
@@ -270,7 +276,8 @@ TO_ADDR = "chrispark@bcairboats.com"
 CC_ADDRS = ["skirscht@bcairboats.com", "allen@clearpathapps.ai"]
 
 
-def send_email(html, to=TO_ADDR, cc=None):
+def send_email(html, charts, to=TO_ADDR, cc=None):
+    """Send HTML email with CID-embedded chart images."""
     if cc is None:
         cc = CC_ADDRS
 
@@ -285,15 +292,24 @@ def send_email(html, to=TO_ADDR, cc=None):
         print(f"  Expected .env at: {env_path}")
         sys.exit(1)
 
-    subject = f"🐊 Boggy Creek Daily Report — {datetime.now().strftime('%B %d, %Y')}"
+    subject = f"\U0001f40a Boggy Creek Daily Report \u2014 {datetime.now().strftime('%B %d, %Y')}"
 
-    # Build MIME message
-    msg = MIMEMultipart("alternative")
+    # Build MIME message: multipart/related so CID images render inline
+    msg = MIMEMultipart("related")
     msg["From"] = gmail_user
     msg["To"] = to
     msg["Cc"] = ", ".join(cc)
     msg["Subject"] = subject
+
+    # Attach the HTML body
     msg.attach(MIMEText(html, "html"))
+
+    # Attach each chart image with a Content-ID matching the cid: in HTML
+    for cid, png_bytes in charts.items():
+        img = MIMEImage(png_bytes, _subtype="png")
+        img.add_header("Content-ID", f"<{cid}>")
+        img.add_header("Content-Disposition", "inline", filename=f"{cid}.png")
+        msg.attach(img)
 
     all_recipients = [to] + cc
 
@@ -305,11 +321,11 @@ def send_email(html, to=TO_ADDR, cc=None):
             server.ehlo()
             server.login(gmail_user, gmail_pass)
             server.sendmail(gmail_user, all_recipients, msg.as_string())
-        print(f"✓ Report sent to {to} + {len(cc)} CC")
+        print(f"\u2713 Report sent to {to} + {len(cc)} CC")
     except smtplib.SMTPAuthenticationError:
         print("ERROR: Gmail authentication failed.")
-        print("  Check GMAIL_APP_PASSWORD in .env (must be a Gmail App Password, not your regular password)")
-        print("  Create one at: myaccount.google.com → Security → App Passwords")
+        print("  Check GMAIL_APP_PASSWORD in .env (must be a Gmail App Password)")
+        print("  Create one at: myaccount.google.com \u2192 Security \u2192 App Passwords")
         sys.exit(1)
     except Exception as e:
         print(f"ERROR: Failed to send email: {e}")
@@ -319,7 +335,7 @@ def send_email(html, to=TO_ADDR, cc=None):
 # ── Main ────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Boggy Creek Airboats — Daily Roller Report")
+    parser = argparse.ArgumentParser(description="Boggy Creek Airboats \u2014 Daily Roller Report")
     parser.add_argument("--test", action="store_true",
                         help="Send report with sample data (no Roller login needed)")
     parser.add_argument("--to", default="chrispark@bcairboats.com",
@@ -333,20 +349,22 @@ def main():
         data = get_sample_data()
     else:
         # TODO: Wire in live Roller API data
-        print("Live Roller data not yet wired — falling back to sample data")
+        print("Live Roller data not yet wired \u2014 falling back to sample data")
         data = get_sample_data()
 
     print("Generating charts...")
+    charts = generate_charts(data)
     html = build_html(data)
-    print(f"✓ HTML generated ({len(html):,} bytes, 4 inline charts)")
+    total_size = len(html) + sum(len(v) for v in charts.values())
+    print(f"\u2713 Generated ({total_size:,} bytes \u2014 HTML + 4 chart images)")
 
     if args.save_html:
         with open(args.save_html, "w") as f:
             f.write(html)
-        print(f"✓ Saved to {args.save_html}")
+        print(f"\u2713 Saved to {args.save_html}")
         return
 
-    send_email(html, to=args.to)
+    send_email(html, charts, to=args.to)
 
 
 if __name__ == "__main__":
